@@ -20,6 +20,18 @@ import torch
 from torch import nn
 
 
+class _FineRsqrt(nn.Module):
+    """rsqrt(clamp(v, max=c)) as its own submodule, so precision rules can give the fine table's int16 input
+    a finer eps floor (`...fine$=a16w8e16`) than the default a16w8 observer (eps 2^-12 caps the grid at 8.0)."""
+
+    def __init__(self, c: float):
+        super().__init__()
+        self.c = float(c)
+
+    def forward(self, v):
+        return torch.rsqrt(torch.clamp(v, max=self.c))
+
+
 class NewtonLayerNorm(nn.LayerNorm):
     """keepdim LayerNorm with (a) N Newton steps on 1/sqrt(var) and (b) an optional dual-range rsqrt:
 
@@ -36,6 +48,7 @@ class NewtonLayerNorm(nn.LayerNorm):
         self.newton_steps = newton_steps
         self.c = None if c is None else float(c)
         if self.c is not None:  # mask ramps from 0 at v = 0.8 c to 1 at v = c (fine table exact below c)
+            self.fine = _FineRsqrt(self.c)
             self.register_buffer("mask_gain", torch.tensor(5.0 / self.c))
             self.register_buffer("mask_bias", torch.tensor(4.0))
         n = 1
@@ -61,7 +74,7 @@ class NewtonLayerNorm(nn.LayerNorm):
             y = torch.rsqrt(var)  # seed through the int16 table (grid sized by the max token)
         else:
             y_coarse = torch.rsqrt(var)
-            y_fine = torch.rsqrt(torch.clamp(var, max=self.c))  # int16 grid sized by c; sinks saturate here
+            y_fine = self.fine(var)  # int16 grid sized by c (rule the submodule to a16w8e16); sinks saturate here
             m = torch.clamp(var * self.mask_gain - self.mask_bias, 0.0, 1.0)  # 0 for v <= 0.8 c, 1 for v >= c
             y = y_fine + m * (y_coarse - y_fine)
         for _ in range(self.newton_steps):
@@ -83,8 +96,10 @@ def swap_layernorms(module: nn.Module, newton_steps: int, cmap=None) -> int:
     return count
 
 
-def collect_var_quantiles(module: nn.Module, run_fn, q: float) -> dict:
-    """fp32 calibration pass: per LayerNorm (by name) the q-quantile of the per-token variance of its input.
+def collect_var_quantiles(module: nn.Module, run_fn, q: float, k: float | None = None) -> dict:
+    """fp32 calibration pass: per LayerNorm (by name) the fine-table ceiling c of the per-token input variance:
+    the q-quantile, or k * median when k is given (a quantile lands inside the bulk when the bulk is tight and the
+    sink fraction is a few percent; k * median with k ~ 4-8 keeps every ordinary token on the fine table).
     run_fn() must drive `module` over the calibration data (hooks collect the variances)."""
     stats, hooks = {}, []
     def hook(name):
@@ -99,7 +114,11 @@ def collect_var_quantiles(module: nn.Module, run_fn, q: float) -> dict:
         run_fn()
     for h in hooks:
         h.remove()
-    return {name: torch.cat(v).quantile(q).item() for name, v in stats.items()}
+    out = {}
+    for name, v in stats.items():
+        v = torch.cat(v)
+        out[name] = (k * v.median().item()) if k else v.quantile(q).item()
+    return out
 
 
 if __name__ == "__main__":  # fp32 self-check: Newton LN == nn.LayerNorm

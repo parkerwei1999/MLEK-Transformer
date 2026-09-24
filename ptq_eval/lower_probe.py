@@ -28,6 +28,7 @@ ap.add_argument("--out-dir", required=True)
 ap.add_argument("--n-cal", type=int, default=8)
 ap.add_argument("--ln-newton-steps", type=int, default=None, help="swap nn.LayerNorm for NewtonLayerNorm with N Newton steps (0 = swap only)")
 ap.add_argument("--ln-dual-q", type=float, default=None, help="dual-range rsqrt: fine table sized by this per-token variance quantile")
+ap.add_argument("--ln-dual-k", type=float, default=None, help="dual-range rsqrt: fine table sized by K x median per-token variance")
 ap.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16], help="quantize aten.embedding tables (decoder)")
 ap.add_argument("--mask-aware", action="store_true", default=False, help="MaskAwareQuantizer softmax-input rewrite, as the vision accuracy runs use")
 ap.add_argument("--pc-rewrite", action="store_true", default=False, help="lower per-channel activation Q/DQ to per-tensor + int32 MULs (pc_rewrite.py)")
@@ -73,13 +74,13 @@ else:
     module = fqvit_models.build_model(args.model)
     example = (torch.randn(1, 3, 224, 224),)
     cal = [(b[:1].to(DEV),) for b in data._load_imgs(args.n_cal, None, "train", shuffle=True, seed=0, data_dir="/home/shared/ImageNet", model_name=args.model, batch_size=1)]
-if args.ln_newton_steps is not None or args.ln_dual_q is not None:
+if args.ln_newton_steps is not None or args.ln_dual_q is not None or args.ln_dual_k is not None:
     from newton_layernorm import swap_layernorms, collect_var_quantiles
     steps = args.ln_newton_steps or 0
     cmap = None
-    if args.ln_dual_q is not None:
+    if args.ln_dual_q is not None or args.ln_dual_k is not None:
         module.to(DEV)
-        cmap = collect_var_quantiles(module, lambda: [module(*b) for b in cal], args.ln_dual_q)
+        cmap = collect_var_quantiles(module, lambda: [module(*b) for b in cal], args.ln_dual_q or 0.9, k=args.ln_dual_k)
         module.cpu()
     print(f"NewtonLayerNorm: {swap_layernorms(module, steps, cmap)} swapped, {steps} step(s), dual={args.ln_dual_q}", flush=True)
 prepared = pe.prepare_on_cpu(module, example, cs, pe.QuantConfig(args.quant_config), pe.ActObserver.HISTOGRAM, [], quantizer_cls=qcls)

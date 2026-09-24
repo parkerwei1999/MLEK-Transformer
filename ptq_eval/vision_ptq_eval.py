@@ -71,18 +71,18 @@ def main(args) -> None:
         from fqvit_models import imagenet_data as data
         model = fqvit_models.build_model(args.model_name)
 
-    if args.ln_newton_steps is not None or args.ln_dual_q is not None:
+    if args.ln_newton_steps is not None or args.ln_dual_q is not None or args.ln_dual_k is not None:
         from newton_layernorm import swap_layernorms, collect_var_quantiles
         steps = args.ln_newton_steps or 0
         cmap = None
-        if args.ln_dual_q is not None:
+        if args.ln_dual_q is not None or args.ln_dual_k is not None:
             model.to(device)
             cal_c = data._load_imgs(args.n_cal, None, "train", shuffle=True, seed=args.seed, data_dir=args.imagenet_dir,
                                     model_name=args.model_name, batch_size=args.batch_size)
             def run_c():
                 for b in cal_c:
                     model(b.to(device))
-            cmap = collect_var_quantiles(model, run_c, args.ln_dual_q)
+            cmap = collect_var_quantiles(model, run_c, args.ln_dual_q or 0.9, k=args.ln_dual_k)
             model.cpu()
             print(f"  dual-range rsqrt: q={args.ln_dual_q}, {len(cmap)} LayerNorms, c range {min(cmap.values()):.3g}..{max(cmap.values()):.3g}", flush=True)
         print(f"  NewtonLayerNorm: {swap_layernorms(model, steps, cmap)} LayerNorms swapped, {steps} step(s), dual={args.ln_dual_q}", flush=True)
@@ -205,6 +205,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--pc-rewrite-bits", type=int, default=None, help="pc_rewrite int32 activation grid = s_base / 2^bits (default adaptive)")
+    parser.add_argument("--ln-dual-k", type=float, default=None, help="Dual-range rsqrt: fine table sized by K x median per-token variance.")
     parser.add_argument("--ln-dual-q", type=float, default=None,
                         help="Dual-range rsqrt in NewtonLayerNorm: fine table sized by this per-token variance quantile.")
     parser.add_argument("--ln-newton-steps", type=int, default=None,
