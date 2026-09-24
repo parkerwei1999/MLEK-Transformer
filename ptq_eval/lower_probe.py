@@ -27,6 +27,8 @@ ap.add_argument("--prec-rules", default="")
 ap.add_argument("--out-dir", required=True)
 ap.add_argument("--n-cal", type=int, default=8)
 ap.add_argument("--ln-newton-steps", type=int, default=0, help="swap nn.LayerNorm for NewtonLayerNorm (Whisper only)")
+ap.add_argument("--pc-rewrite", action="store_true", default=False, help="lower per-channel activation Q/DQ to per-tensor + int32 MULs (pc_rewrite.py)")
+ap.add_argument("--verbose-partition", action="store_true", default=False, help="log the Arm partitioner's per-node rejection reasons")
 args = ap.parse_args()
 out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 torch.backends.cudnn.allow_tf32 = False; torch.backends.cuda.matmul.allow_tf32 = False
@@ -61,7 +63,14 @@ pe.move_graph_module(prepared, DEV)
 with torch.no_grad():
     for b in cal:
         prepared(*b)
+if args.verbose_partition:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("executorch.backends.arm").setLevel(logging.INFO)
 converted = convert_pt2e(prepared)
+if args.pc_rewrite:
+    from pc_rewrite import rewrite_per_channel_activations
+    print(f"pc_rewrite: {rewrite_per_channel_activations(converted)} per-channel activation sites rewritten", flush=True)
 pe.move_graph_module(converted, "cpu")
 example_cpu = tuple(t.cpu() for t in example)
 exported = torch.export.export(converted, example_cpu, strict=True)

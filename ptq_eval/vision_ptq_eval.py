@@ -128,6 +128,9 @@ def main(args) -> None:
             for batch in cal_batches:
                 variant["graph"](batch.to(device))
             variant["graph"] = convert_pt2e(variant["graph"])
+            if args.pc_rewrite:
+                from pc_rewrite import rewrite_per_channel_activations
+                print(f"  pc_rewrite[{label}]: {rewrite_per_channel_activations(variant['graph'], x_bits_below=args.pc_rewrite_bits)} per-channel activation sites (x grid s_base/2^{args.pc_rewrite_bits})", flush=True)
     print(f"calibrate+convert on {device}: {time.time() - t0:.0f}s, "
           f"{len(cal_batches)} batches of {args.batch_size}", flush=True)
 
@@ -186,6 +189,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--pc-rewrite-bits", type=int, default=None, help="pc_rewrite int32 activation grid = s_base / 2^bits (default adaptive)")
+    parser.add_argument("--pc-rewrite", action="store_true", default=False,
+                        help="Rewrite per-channel activation Q/DQ into per-tensor + int32 MULs (pc_rewrite.py) before evaluation.")
     parser.add_argument("--imagenet-dir", default="/home/shared/ImageNet")
     parser.add_argument("--fqvit-dir", default=None,
                         help="Optional FQ-ViT checkout; default uses the vendored fqvit_models package.")

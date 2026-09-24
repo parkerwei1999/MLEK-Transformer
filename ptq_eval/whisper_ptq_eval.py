@@ -37,6 +37,7 @@ from executorch.backends.arm.quantizer.arm_quantizer import (
 )
 from torchao.quantization.pt2e import MinMaxObserver
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+PC_REWRITE = False  # set from --pc-rewrite: lower per-channel activation Q/DQ before evaluation
 from transformers import GenerationConfig
 from whisper.normalizers import EnglishTextNormalizer
 from whisper.tokenizer import get_tokenizer
@@ -296,6 +297,9 @@ def calibrate_and_convert(name: str, prepared, calib_batches, device: str):
             prepared(*batch)
     t1 = time.time()
     converted = convert_pt2e(prepared)
+    if PC_REWRITE:
+        from pc_rewrite import rewrite_per_channel_activations
+        print(f"  pc_rewrite[{name}]: {rewrite_per_channel_activations(converted)} per-channel activation sites", flush=True)
     print(f"  quantize[{name}] on {device}: calibrate={t1 - t0:.1f}s over {len(calib_batches)} "
           f"batches ({(t1 - t0) / len(calib_batches):.2f}s/batch) convert={time.time() - t1:.1f}s",
           flush=True)
@@ -413,6 +417,8 @@ def main(args) -> None:
 
     encoder, enc_example = wrapper._build(args.model_id, wrapper.WhisperPart.ENCODER, args.dec_len)
     decoder, dec_example = wrapper._build(args.model_id, wrapper.WhisperPart.DECODER, args.dec_len)
+    global PC_REWRITE
+    PC_REWRITE = args.pc_rewrite
     if args.ln_newton_steps:
         from newton_layernorm import swap_layernorms
         n_swapped = swap_layernorms(encoder, args.ln_newton_steps) + swap_layernorms(decoder, args.ln_newton_steps)
@@ -509,6 +515,11 @@ def main(args) -> None:
             encoder_q = convert_pt2e(enc_prep)
         if dec_prep is not None:
             decoder_q = convert_pt2e(dec_prep)
+        if PC_REWRITE:
+            from pc_rewrite import rewrite_per_channel_activations
+            for nm, g in (("encoder", encoder_q), ("decoder", decoder_q)):
+                if g is not None:
+                    print(f"  pc_rewrite[{nm}]: {rewrite_per_channel_activations(g)} per-channel activation sites", flush=True)
     else:
         mels = [log_mel(data.load_audio_torchaudio(p), device) for p, _ in cal_pairs]
         if QuantPart.ENCODER in quant_parts:
@@ -544,6 +555,8 @@ def main(args) -> None:
         label += f"-rules[{args.prec_rules}]"
     if args.ln_newton_steps:
         label += f"-newton{args.ln_newton_steps}"
+    if args.pc_rewrite:
+        label += "-pcrw"
     if args.dump_ln_scales:
         dump_ln_scales(out_dir / f"ln_scales_{label}.txt", encoder_q, decoder_q, encoder, decoder,
                        [log_mel(data.load_audio_torchaudio(a), device) for a, _ in cal_pairs[:8]], greedy, device)
@@ -577,6 +590,8 @@ if __name__ == "__main__":
     parser.add_argument("--calib-feed", choices=[f.value for f in CalibFeed],
                         default=CalibFeed.PARALLEL.value)
     parser.add_argument("--keep-fp32", nargs="*", choices=[k.value for k in KeepFp32], default=[])
+    parser.add_argument("--pc-rewrite", action="store_true", default=False,
+                        help="Rewrite per-channel activation Q/DQ into per-tensor + int32 MULs (pc_rewrite.py) before evaluation.")
     parser.add_argument("--ln-newton-steps", type=int, default=0,
                         help="Swap nn.LayerNorm for NewtonLayerNorm: rsqrt table seed + N int32 Newton steps (0 = off).")
     parser.add_argument("--dump-ln-scales", action="store_true", default=False,
