@@ -77,27 +77,30 @@ class QuantConfig(Enum):
     A16INPTF8OUT = "a16inptf8out"  # int16 inputs, int8 per-channel power-of-two (FQ-ViT PTF) output
     A16INPC8OUT = "a16inpc8out"    # int16 inputs, int8 per-channel with UNCONSTRAINED per-channel scales (arbitrary multiplier)
     A16INPC16OUT = "a16inpc16out"  # int16 inputs, int16 per-channel MinMax output (OFM per-channel scaling at 16 bit)
+    A16INPC8SYMOUT = "a16inpc8symout"  # int16 inputs, int8 per-channel SYMMETRIC MinMax output (zero-point-free: lowering rewrite = per-channel MUL only)
 
     def build(self, act_observer: ActObserver):
         if self is QuantConfig.A8IN16OUT:
             a16 = QuantConfig.A16W8.build(act_observer); a8 = QuantConfig.A8W8.build(act_observer)
             return QuantizationConfig(a8.input_activation, a16.output_activation, a8.weight, a8.bias)
-        if self in (QuantConfig.A16IN8OUT, QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT):
+        if self in (QuantConfig.A16IN8OUT, QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT,
+                    QuantConfig.A16INPC8SYMOUT):
             a16 = QuantConfig.A16W8.build(act_observer)
             a8 = QuantConfig.A8W8.build(act_observer)
             out = a8.output_activation
-            if self in (QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT):
+            if self in (QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT, QuantConfig.A16INPC8SYMOUT):
                 from torchao.quantization.pt2e.quantizer import QuantizationSpec
                 from torchao.quantization.pt2e import PerChannelMinMaxObserver
                 from ptf_observer import PTFPerChannelObserver
                 dtype, lo, hi, eps = ((torch.int16, -32768, 32767, 2 ** -16) if self is QuantConfig.A16INPC16OUT
                                       else (torch.int8, -128, 127, 2 ** -12))
+                qscheme = torch.per_channel_symmetric if self is QuantConfig.A16INPC8SYMOUT else torch.per_channel_affine
                 obs = (PTFPerChannelObserver.with_args(ch_axis=2) if self is QuantConfig.A16INPTF8OUT
-                       else PerChannelMinMaxObserver.with_args(ch_axis=2, dtype=dtype, qscheme=torch.per_channel_affine,
+                       else PerChannelMinMaxObserver.with_args(ch_axis=2, dtype=dtype, qscheme=qscheme,
                                                                quant_min=lo, quant_max=hi, eps=eps))
                 out = QuantizationSpec(dtype=dtype, quant_min=lo, quant_max=hi,
-                                       qscheme=torch.per_channel_affine, ch_axis=2, observer_or_fake_quant_ctr=obs)
-            if self in (QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT):
+                                       qscheme=qscheme, ch_axis=2, observer_or_fake_quant_ctr=obs)
+            if self in (QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT, QuantConfig.A16INPC8SYMOUT):
                 # The Arm QuantizationConfig only admits per-tensor activation specs; PTF is per-channel
                 # (fake-quant accuracy experiment, not a lowerable config), so bypass that validation.
                 class _LooseQuantizationConfig(QuantizationConfig):
