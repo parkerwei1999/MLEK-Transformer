@@ -38,7 +38,7 @@ from executorch.backends.arm.quantizer.arm_quantizer import (
 from torchao.quantization.pt2e import MinMaxObserver
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
 PC_REWRITE = False  # set from --pc-rewrite: lower per-channel activation Q/DQ before evaluation
-from transformers import GenerationConfig
+from transformers import AutoConfig, GenerationConfig
 from whisper.normalizers import EnglishTextNormalizer
 from whisper.tokenizer import get_tokenizer
 
@@ -170,8 +170,11 @@ def load_module_from_path(name: str, path: Path):
     return module
 
 
+N_MELS = 80  # set from the model config in main(): whisper-large-v3 uses 128 mel bins
+
+
 def log_mel(audio, device: str) -> torch.Tensor:
-    mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(audio), n_mels=80)
+    mel = whisper.log_mel_spectrogram(whisper.pad_or_trim(audio), n_mels=N_MELS)
     return mel.unsqueeze(0).to(device)
 
 
@@ -179,7 +182,12 @@ class GreedyDecoder:
     """Static-length greedy decoding shared by the FP32 and int8 decoders."""
 
     def __init__(self, model_id: str, dec_len: int, device: str):
-        self.tokenizer = get_tokenizer(multilingual=True, language="en", task="transcribe")
+        # large-v3 adds the <|yue|> language token (vocab 51866): with 100 languages the
+        # <|transcribe|> / <|notimestamps|> ids shift by one, so the prompt must be built
+        # for the model's own language count or the decoder is asked to translate instead.
+        vocab_size = AutoConfig.from_pretrained(model_id).vocab_size
+        self.tokenizer = get_tokenizer(multilingual=True, num_languages=100 if vocab_size == 51866 else 99,
+                                       language="en", task="transcribe")
         self.prompt = list(self.tokenizer.sot_sequence_including_notimestamps)
         self.eot = self.tokenizer.eot
         self.dec_len = dec_len
@@ -433,6 +441,8 @@ def main(args) -> None:
                         data.load_audio_torchaudio, normalizer, out_dir))
         del model
 
+    global N_MELS
+    N_MELS = AutoConfig.from_pretrained(args.model_id).num_mel_bins
     if not stages & {Stage.FP32_STATIC, Stage.INT8}:
         return
 
