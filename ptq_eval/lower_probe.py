@@ -26,6 +26,7 @@ ap.add_argument("--quant-config", default="a16w8")
 ap.add_argument("--prec-rules", default="")
 ap.add_argument("--out-dir", required=True)
 ap.add_argument("--n-cal", type=int, default=8)
+ap.add_argument("--ln-newton-steps", type=int, default=0, help="swap nn.LayerNorm for NewtonLayerNorm (Whisper only)")
 args = ap.parse_args()
 out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 torch.backends.cudnn.allow_tf32 = False; torch.backends.cuda.matmul.allow_tf32 = False
@@ -43,6 +44,9 @@ if args.model == "whisper-tiny-encoder":
     data = pe.load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
     wrapper = pe.load_module_from_path("whisper_et_model", HERE / "whisper_et_model.py")
     module, example = wrapper._build("openai/whisper-tiny", wrapper.WhisperPart.ENCODER, 128)
+    if args.ln_newton_steps:
+        from newton_layernorm import swap_layernorms
+        print(f"NewtonLayerNorm: {swap_layernorms(module, args.ln_newton_steps)} swapped, {args.ln_newton_steps} step(s)", flush=True)
     pairs = data.gather_librispeech_files("/home/shared/LibriSpeech", "dev-clean", args.n_cal)
     cal = [(pe.log_mel(data.load_audio_torchaudio(p), DEV),) for p, _ in pairs]
 else:
