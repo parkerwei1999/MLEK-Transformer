@@ -7,7 +7,7 @@ LayerNorm reads codes back through a per-channel shift (or, on Ethos-U, a MUL by
 constant vector). Channel axis = last dim.
 """
 import torch
-from torchao.quantization.pt2e import PerChannelMinMaxObserver
+from torchao.quantization.pt2e import MinMaxObserver, PerChannelMinMaxObserver
 
 
 class PTFPerChannelObserver(PerChannelMinMaxObserver):
@@ -28,3 +28,35 @@ class PTFPerChannelObserver(PerChannelMinMaxObserver):
         scale = base * torch.pow(2.0, alpha)
         zp = (self.quant_min - torch.round(min_val / scale)).clamp(self.quant_min, self.quant_max)
         return scale.to(torch.float32), zp.to(torch.int32)
+
+
+class KMedianObserver(MinMaxObserver):
+    """Per-tensor symmetric scale = k * median(|x|) / quant_max instead of max / quant_max.
+
+    For the fine rsqrt table of the dual-range LayerNorm: the per-token variance tensor is dominated by a
+    few sink tokens (max / median up to 1e5), so a MinMax grid leaves ordinary tokens a handful of levels.
+    Sizing the grid by k * median gives ordinary tokens thousands of levels; the sink tokens saturate in the
+    quantize (= the int32 -> int16 RESCALE on the device), and the coarse table handles them.
+    """
+
+    def __init__(self, k=4.0, max_samples=1_000_000, **kwargs):
+        super().__init__(**kwargs)
+        self.k = float(k)
+        self.max_samples = max_samples
+        self.register_buffer("samples", torch.zeros(0))
+
+    def forward(self, x):
+        super().forward(x)
+        v = x.detach().abs().reshape(-1).float()  # stay on the observer's device: convert_pt2e asserts a single device
+        if v.numel() > 8192:
+            v = v[torch.randint(0, v.numel(), (8192,), device=v.device)]
+        self.samples = torch.cat([self.samples.to(v.device), v])[-self.max_samples:]
+        return x
+
+    def calculate_qparams(self):
+        if self.samples.numel() == 0:
+            return super().calculate_qparams()
+        c = self.k * self.samples.median().item()
+        dev = self.samples.device
+        scale = torch.tensor([max(c / self.quant_max, self.eps)], dtype=torch.float32, device=dev)
+        return scale, torch.zeros(1, dtype=torch.int64, device=dev)

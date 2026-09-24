@@ -58,6 +58,7 @@ class CalibFeed(Enum):
 class ActObserver(Enum):
     HISTOGRAM = "histogram"  # Arm default: searches a clipped range that minimizes quantization error
     MINMAX = "minmax"        # full observed range, as FQ-ViT's calibrate() folds min / max
+    KMEDIAN = "kmedian"      # per-tensor grid sized by k * median |x| (env LN_DUAL_K, default 4), saturating: the dual-range fine rsqrt table
 
 
 class KeepFp32(Enum):
@@ -136,10 +137,15 @@ class QuantConfig(Enum):
                                    qscheme=torch.per_tensor_symmetric,
                                    observer_or_fake_quant_ctr=MinMaxObserver.with_args(eps=2 ** -20))
             return QuantizationConfig(act, act, config.weight, config.bias)
+        eps = 2 ** -16 if self is QuantConfig.A16W8E16 else 2 ** -12
         if act_observer is ActObserver.MINMAX:
-            act = dataclasses.replace(
-                config.input_activation,
-                observer_or_fake_quant_ctr=MinMaxObserver.with_args(eps=2**-12))
+            act = dataclasses.replace(config.input_activation, observer_or_fake_quant_ctr=MinMaxObserver.with_args(eps=eps))
+            config = QuantizationConfig(act, act, config.weight, config.bias)
+        elif act_observer is ActObserver.KMEDIAN:
+            import os
+            from ptf_observer import KMedianObserver
+            act = dataclasses.replace(config.input_activation,
+                                      observer_or_fake_quant_ctr=KMedianObserver.with_args(k=float(os.environ.get("LN_DUAL_K", 4)), eps=eps))
             config = QuantizationConfig(act, act, config.weight, config.bias)
         return config
 

@@ -78,11 +78,11 @@ if args.ln_newton_steps is not None or args.ln_dual_q is not None or args.ln_dua
     from newton_layernorm import swap_layernorms, collect_var_quantiles
     steps = args.ln_newton_steps or 0
     cmap = None
-    if args.ln_dual_q is not None or args.ln_dual_k is not None:
-        module.to(DEV)
-        cmap = collect_var_quantiles(module, lambda: [module(*b) for b in cal], args.ln_dual_q or 0.9, k=args.ln_dual_k)
-        module.cpu()
-    print(f"NewtonLayerNorm: {swap_layernorms(module, steps, cmap)} swapped, {steps} step(s), dual={args.ln_dual_q}", flush=True)
+    if args.ln_dual_q is not None or args.ln_dual_k is not None:  # fp32 pass on CPU: a module that has run on CUDA keeps
+        # cached CUDA tensors that .cpu() does not move, and prepare_pt2e then rejects the mixed devices
+        cal_cpu = [tuple(t.cpu() for t in b) for b in cal]
+        cmap = collect_var_quantiles(module, lambda: [module(*b) for b in cal_cpu], args.ln_dual_q or 0.9, k=args.ln_dual_k)
+    print(f"NewtonLayerNorm: {swap_layernorms(module, steps, cmap)} swapped, {steps} step(s), dual q={args.ln_dual_q} k={args.ln_dual_k}", flush=True)
 prepared = pe.prepare_on_cpu(module, example, cs, pe.QuantConfig(args.quant_config), pe.ActObserver.HISTOGRAM, [], quantizer_cls=qcls)
 pe.move_graph_module(prepared, DEV)
 with torch.no_grad():

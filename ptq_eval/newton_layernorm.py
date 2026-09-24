@@ -21,24 +21,45 @@ from torch import nn
 
 
 class _FineRsqrt(nn.Module):
-    """rsqrt(clamp(v, max=c)) as its own submodule, so precision rules can give the fine table's int16 input
-    a finer eps floor (`...fine$=a16w8e16`) than the default a16w8 observer (eps 2^-12 caps the grid at 8.0)."""
+    """The fine rsqrt table as its own submodule so a rule can give its int16 input the k*median observer
+    (`layer_norm\\.fine$=a32w8@mul;layer_norm\\.fine$=a16w8e16:kmedian`): the input grid is sized by k * median variance and sink tokens
+    saturate in the quantize itself, which on the device is the saturating int32 -> int16 RESCALE before the
+    TABLE (no clamp op; the Arm backend has no int32 CLAMP)."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("one", torch.tensor(1.0))  # v * 1: gives the fine table its own input edge (PT2E would
+        # otherwise share the coarse rsqrt's int16 observer on the common `var` edge); an int32 MUL on [T,1] on device
+
+    def forward(self, v):
+        return torch.rsqrt(v * self.one)
+
+
+class _Mask(nn.Module):
+    """m = clamp(v * gain - bias, 0, 1): 0 up to v = 0.8 c, 1 from v = c. Its own submodule so it can run at int16
+    (`layer_norm\\.mask$=a16w8e16:kmedian`: MUL / SUB / CLAMP on int16, all Vela-native); 1/32767 resolution is plenty."""
 
     def __init__(self, c: float):
         super().__init__()
-        self.c = float(c)
+        # ramp 0.4 c .. 0.5 c: the mask path's saturating grid tops out at k * median * gain = 10, well above bias + 1,
+        # so the sink always lands at m = 1 (with a ramp at c the saturation point coincided with the threshold)
+        self.register_buffer("gain", torch.tensor(10.0 / float(c)))
+        self.register_buffer("bias", torch.tensor(4.0))
 
     def forward(self, v):
-        return torch.rsqrt(torch.clamp(v, max=self.c))
+        # The annotator shares the clamp's output grid with its input, and v * gain spans thousands for the sink
+        # token, so this submodule takes the k*median (saturating) observer too: `layer_norm\\.mask$=a16w8e16:kmedian`.
+        # The sink saturates at k * median * gain (> bias + 1, so m = 1), ordinary tokens keep a fine grid.
+        return torch.clamp(v * self.gain - self.bias, 0.0, 1.0)
 
 
 class NewtonLayerNorm(nn.LayerNorm):
     """keepdim LayerNorm with (a) N Newton steps on 1/sqrt(var) and (b) an optional dual-range rsqrt:
 
-    dual range (c = per-LN quantile of the per-token variance, set at calibration): a fine table
-    y_f = rsqrt(clamp(v, max=c)) whose int16 input grid is sized by c (ordinary tokens get thousands of
+    dual range (c = k * median per-token variance, set at calibration): a fine table
+    y_f = rsqrt(v) whose int16 input grid is sized by c (kmedian observer, saturating) (ordinary tokens get thousands of
     levels, sink tokens saturate) and the coarse table y_c = rsqrt(v) sized by the max (right for the
-    sink), blended with a mask m = clamp(5 v / c - 4, 0, 1) (0 up to v = 0.8 c, 1 from c): y = y_f + m (y_c - y_f).
+    sink), blended with a mask m = clamp(10 v / c - 4, 0, 1) (0 up to v = 0.4 c, 1 from 0.5 c): y = y_f + m (y_c - y_f).
     c must sit below the sink fraction of tokens (decoder sinks are ~1 per utterance, i.e. a few percent), so q ~ 0.9. Every op is
     add / sub / mul / clamp / rsqrt, i.e. TOSA ADD/SUB/MUL/CLAMP/TABLE + RESCALE.
     """
@@ -47,10 +68,9 @@ class NewtonLayerNorm(nn.LayerNorm):
         super().__init__(normalized_shape, eps=eps, elementwise_affine=True)
         self.newton_steps = newton_steps
         self.c = None if c is None else float(c)
-        if self.c is not None:  # mask ramps from 0 at v = 0.8 c to 1 at v = c (fine table exact below c)
-            self.fine = _FineRsqrt(self.c)
-            self.register_buffer("mask_gain", torch.tensor(5.0 / self.c))
-            self.register_buffer("mask_bias", torch.tensor(4.0))
+        if self.c is not None:
+            self.fine = _FineRsqrt()
+            self.mask = _Mask(self.c)
         n = 1
         for d in self.normalized_shape:
             n *= d
@@ -74,8 +94,8 @@ class NewtonLayerNorm(nn.LayerNorm):
             y = torch.rsqrt(var)  # seed through the int16 table (grid sized by the max token)
         else:
             y_coarse = torch.rsqrt(var)
-            y_fine = self.fine(var)  # int16 grid sized by c (rule the submodule to a16w8e16); sinks saturate here
-            m = torch.clamp(var * self.mask_gain - self.mask_bias, 0.0, 1.0)  # 0 for v <= 0.8 c, 1 for v >= c
+            y_fine = self.fine(var)   # int16 grid sized by k * median (kmedian observer); sinks saturate here
+            m = self.mask(var)        # 0 for v <= 0.4 c, 1 for v >= 0.5 c
             y = y_fine + m * (y_coarse - y_fine)
         for _ in range(self.newton_steps):
             y = y * (self.c15 - (var * y * y) * self.c05)
