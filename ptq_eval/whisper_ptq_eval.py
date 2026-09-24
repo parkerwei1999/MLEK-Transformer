@@ -1,6 +1,6 @@
 """Post-training quantization (PTQ) with real-speech calibration, plus word /
 character error rate (WER / CER) evaluation, for the Whisper Ethos-U wrappers
-defined in ../whisper_et_model.py.
+defined in ../whisper_executorch_wrapper.py.
 
 `examples.arm.aot_arm_compiler` can only calibrate on the single example input,
 so this script repeats its quantization recipe (EthosUQuantizer + the default
@@ -79,11 +79,26 @@ class QuantConfig(Enum):
     A16INPC8OUT = "a16inpc8out"    # int16 inputs, int8 per-channel with UNCONSTRAINED per-channel scales (arbitrary multiplier)
     A16INPC16OUT = "a16inpc16out"  # int16 inputs, int16 per-channel MinMax output (OFM per-channel scaling at 16 bit)
     A16INPC8SYMOUT = "a16inpc8symout"  # int16 inputs, int8 per-channel SYMMETRIC MinMax output (zero-point-free: lowering rewrite = per-channel MUL only)
+    APTF8IN8OUT = "aptf8in8out"    # int8 PER-CHANNEL (PTF) input, int8 per-tensor output: per-channel LN output folded into the next Linear's weights
 
     def build(self, act_observer: ActObserver):
         if self is QuantConfig.A8IN16OUT:
             a16 = QuantConfig.A16W8.build(act_observer); a8 = QuantConfig.A8W8.build(act_observer)
             return QuantizationConfig(a8.input_activation, a16.output_activation, a8.weight, a8.bias)
+        if self is QuantConfig.APTF8IN8OUT:
+            from torchao.quantization.pt2e.quantizer import QuantizationSpec
+            from ptf_observer import PTFPerChannelObserver
+            a8 = QuantConfig.A8W8.build(act_observer)
+            inp = QuantizationSpec(dtype=torch.int8, quant_min=-128, quant_max=127, qscheme=torch.per_channel_affine, ch_axis=2,
+                                   observer_or_fake_quant_ctr=PTFPerChannelObserver.with_args(ch_axis=2))
+
+            class _LooseInputConfig(QuantizationConfig):
+                def get_input_act_qspec(self, node=None):
+                    return self.input_activation
+
+                def get_output_act_qspec(self, node=None):
+                    return self.output_activation
+            return _LooseInputConfig(inp, a8.output_activation, a8.weight, a8.bias)
         if self in (QuantConfig.A16IN8OUT, QuantConfig.A16INPTF8OUT, QuantConfig.A16INPC8OUT, QuantConfig.A16INPC16OUT,
                     QuantConfig.A16INPC8SYMOUT):
             a16 = QuantConfig.A16W8.build(act_observer)
@@ -390,7 +405,7 @@ def main(args) -> None:
 
     data = load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
     protocol = load_module_from_path("whisper_protocol", HERE / "data/whisper_protocol.py")
-    wrapper = load_module_from_path("whisper_et_model", HERE / "whisper_et_model.py")
+    wrapper = load_module_from_path("whisper_executorch_wrapper", HERE / "whisper_executorch_wrapper.py")
 
     eval_pairs = data.gather_librispeech_files(args.librispeech_dir, "test-clean", args.n_eval)
     cal_pairs = data.gather_librispeech_files(args.librispeech_dir, "dev-clean", args.n_cal)
@@ -461,7 +476,8 @@ def main(args) -> None:
             rules.append((regex, None if cfg == "fp32" else QuantConfig(cfg).build(
                 ActObserver(obs or args.act_observer)), set(ops.split(",")) if ops else None))
         quantizer_cls = functools.partial(maq.MixedPrecisionQuantizer, rules=rules,
-                                          mask_threshold=maq.MASK_THRESHOLD if args.mask_aware else None)
+                                          mask_threshold=maq.MASK_THRESHOLD if args.mask_aware else None,
+                                          embedding_bits=args.embedding_bits)
     prepared = {}
     if Stage.INT8 in stages:
         t0 = time.time()
@@ -572,6 +588,8 @@ def main(args) -> None:
         label += f"-newton{args.ln_newton_steps}"
     if args.ln_dual_q is not None:
         label += f"-dual{args.ln_dual_q}"
+    if args.embedding_bits:
+        label += f"-emb{args.embedding_bits}"
     if args.pc_rewrite:
         label += "-pcrw"
     if args.dump_ln_scales:
@@ -609,6 +627,8 @@ if __name__ == "__main__":
     parser.add_argument("--keep-fp32", nargs="*", choices=[k.value for k in KeepFp32], default=[])
     parser.add_argument("--pc-rewrite", action="store_true", default=False,
                         help="Rewrite per-channel activation Q/DQ into per-tensor + int32 MULs (pc_rewrite.py) before evaluation.")
+    parser.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16],
+                        help="Quantize the decoder token-embedding table (per-tensor symmetric) instead of leaving it fp32.")
     parser.add_argument("--ln-dual-q", type=float, default=None,
                         help="Dual-range rsqrt in NewtonLayerNorm: fine table sized by this per-token variance quantile (e.g. 0.995).")
     parser.add_argument("--ln-newton-steps", type=int, default=None,

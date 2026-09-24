@@ -53,7 +53,7 @@ def fqn(node):
 
 def main(args):
     if args.model.startswith("whisper"):
-        wrapper = pe.load_module_from_path("whisper_et_model", HERE / "whisper_et_model.py")
+        wrapper = pe.load_module_from_path("whisper_executorch_wrapper", HERE / "whisper_executorch_wrapper.py")
         data = pe.load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
         model, example = wrapper._build(f"openai/{args.model}", wrapper.WhisperPart.ENCODER, 128)
         pairs = data.gather_librispeech_files(args.librispeech_dir, "dev-clean", args.n_cal)

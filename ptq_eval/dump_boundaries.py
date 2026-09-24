@@ -156,7 +156,7 @@ def main(args):
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data = pe.load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
-    wrapper = pe.load_module_from_path("whisper_et_model", HERE / "whisper_et_model.py")
+    wrapper = pe.load_module_from_path("whisper_executorch_wrapper", HERE / "whisper_executorch_wrapper.py")
     cal_pairs = data.gather_librispeech_files(args.librispeech_dir, "dev-clean", args.n_cal)
     mels = [pe.log_mel(data.load_audio_torchaudio(p), args.device) for p, _ in cal_pairs]
     torch.backends.cudnn.allow_tf32 = False

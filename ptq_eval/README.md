@@ -13,9 +13,9 @@ Vela is patched: every extension is a quantizer subclass or a graph pass in this
 | `mask_aware_quantizer.py` | `MixedPrecisionQuantizer` (per-module / per-op precision rules), `MaskAwareQuantizer`, the memory-op pass (`_widen_memory_ops`) |
 | `ptf_observer.py` | per-channel power-of-two-factor int8 activation observer (`PTF_MAX_ALPHA` env overrides the alpha clamp) |
 | `newton_layernorm.py` | `NewtonLayerNorm`: rsqrt table seed + int32 Newton steps (`--ln-newton-steps N`) |
-| `whisper_et_model.py` | HF Whisper split into exportable encoder / decoder modules |
+| `whisper_executorch_wrapper.py` | HF Whisper split into exportable encoder / decoder modules |
 | `lower_probe.py` | TOSA + Ethos-U85 Vela lowering check for one configuration (`--target`, `--vela-flags`) |
-| `block_dag.py`, `dump_boundaries.py`, `fc2_census.py` | diagnostics: per-block Q/DQ DAG, boundary dump, fp32 activation survey |
+| `block_dag.py`, `dump_boundaries.py`, `fc2_profile.py` | diagnostics: per-block Q/DQ DAG, boundary dump, fp32 activation survey |
 | `fqvit_models/` | vendored FQ-ViT model definitions + ImageNet loader (see its `VERSION.md`) |
 | `data/` | LibriSpeech loader and the Whisper calibration / WER protocol |
 | `chains/` | the experiment scripts behind the recorded results (`PTQ_EVAL` = this dir, `PTQ_PY` = python) |

@@ -160,9 +160,10 @@ class MixedPrecisionQuantizer(MaskAwareQuantizer):
     no later pass quantizes them. Remaining nodes get the stock annotation.
     """
 
-    def __init__(self, compile_spec, rules=(), mask_threshold=MASK_THRESHOLD):
+    def __init__(self, compile_spec, rules=(), mask_threshold=MASK_THRESHOLD, embedding_bits=None):
         super().__init__(compile_spec, mask_threshold)
         self.rules = list(rules)
+        self.embedding_bits = embedding_bits  # 8 / 16: quantize aten.embedding tables (per-tensor symmetric); output left to the consumer
 
     def annotate(self, model):
         for rule in self.rules:
@@ -187,7 +188,31 @@ class MixedPrecisionQuantizer(MaskAwareQuantizer):
                 inner = self if hasattr(self, "_annotate_all_static_patterns") else self.quantizer
                 inner._annotate_all_static_patterns(model, config, matches)
         model = super().annotate(model)
+        if self.embedding_bits:
+            self._annotate_embeddings(model)
         return self._widen_memory_ops(model)
+
+    def _annotate_embeddings(self, model):
+        """aten.embedding: the stock Arm annotator leaves the table in fp32. Quantize the table per-tensor symmetric
+        (int8 / int16, MinMax) and leave the gathered output unannotated: the consumer's own input observer
+        (e.g. the positional add at int16) re-quantizes it, which on the device is GATHER + RESCALE."""
+        from torchao.quantization.pt2e import MinMaxObserver
+        from torchao.quantization.pt2e.quantizer import QuantizationSpec
+        bits = self.embedding_bits
+        lo, hi = (-128, 127) if bits == 8 else (-32768, 32767)
+        spec = QuantizationSpec(dtype=torch.int8 if bits == 8 else torch.int16, quant_min=lo, quant_max=hi,
+                                qscheme=torch.per_tensor_symmetric, observer_or_fake_quant_ctr=MinMaxObserver.with_args(eps=2 ** -16))
+        n = 0
+        for node in model.graph.nodes:
+            if node.op == "call_function" and node.target is torch.ops.aten.embedding.default:
+                weight = node.args[0]
+                ann = QuantizationAnnotation(input_qspec_map={weight: spec}, output_qspec=None, _annotated=True)
+                node.meta["quantization_annotation"] = ann
+                custom = dict(node.meta.get("custom", {}))
+                custom["_arm_annotation_info"] = {"quantized": True}
+                node.meta["custom"] = custom
+                n += 1
+        self.annotated_embeddings = n
 
     # Memory / shape ops (view, slice, cat, permute, ...) are annotated by the Arm annotator as
     # quantization boundaries. When their producer is per-channel (PTF) or int16/int32, the global

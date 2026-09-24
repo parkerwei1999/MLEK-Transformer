@@ -19,7 +19,7 @@ sys.path.insert(0, str(HERE))
 import whisper_ptq_eval as pe, mask_aware_quantizer as maq, dump_boundaries as db
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--model", default="whisper-tiny-encoder", help="whisper-tiny-encoder or an FQ-ViT vision model name")
+ap.add_argument("--model", default="whisper-tiny-encoder", help="whisper-<size>-<encoder|decoder> or an FQ-ViT vision model name")
 ap.add_argument("--target", default="ethos-u85-256", help="ethos-u85-256 | ethos-u55-128 | ethos-u65-256")
 ap.add_argument("--vela-flags", default="--verbose-cycle-estimate", help="space-separated extra Vela flags (cost model summary)")
 ap.add_argument("--quant-config", default="a16w8")
@@ -28,6 +28,8 @@ ap.add_argument("--out-dir", required=True)
 ap.add_argument("--n-cal", type=int, default=8)
 ap.add_argument("--ln-newton-steps", type=int, default=None, help="swap nn.LayerNorm for NewtonLayerNorm with N Newton steps (0 = swap only)")
 ap.add_argument("--ln-dual-q", type=float, default=None, help="dual-range rsqrt: fine table sized by this per-token variance quantile")
+ap.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16], help="quantize aten.embedding tables (decoder)")
+ap.add_argument("--mask-aware", action="store_true", default=False, help="MaskAwareQuantizer softmax-input rewrite, as the vision accuracy runs use")
 ap.add_argument("--pc-rewrite", action="store_true", default=False, help="lower per-channel activation Q/DQ to per-tensor + int32 MULs (pc_rewrite.py)")
 ap.add_argument("--verbose-partition", action="store_true", default=False, help="log the Arm partitioner's per-node rejection reasons")
 args = ap.parse_args()
@@ -38,17 +40,32 @@ rules = []
 for item in [r for r in args.prec_rules.split(";") if r]:
     rx, cfg = item.rsplit("=", 1); cfg, _, ops = cfg.partition("@"); cfg, _, obs = cfg.partition(":")
     rules.append((rx, None if cfg == "fp32" else pe.QuantConfig(cfg).build(pe.ActObserver(obs or "histogram")), set(ops.split(",")) if ops else None))
-qcls = functools.partial(maq.MixedPrecisionQuantizer, rules=rules, mask_threshold=None) if rules else pe.EthosUQuantizer
+qcls = (functools.partial(maq.MixedPrecisionQuantizer, rules=rules, mask_threshold=maq.MASK_THRESHOLD if args.mask_aware else None,
+                          embedding_bits=args.embedding_bits) if (rules or args.embedding_bits or args.mask_aware) else pe.EthosUQuantizer)
 SYSCFG = {"ethos-u85-256": "Ethos_U85_SYS_DRAM_Low", "ethos-u55-128": "Ethos_U55_High_End_Embedded", "ethos-u65-256": "Ethos_U65_High_End"}
 cs = EthosUCompileSpec(args.target, system_config=SYSCFG.get(args.target, "Ethos_U85_SYS_DRAM_Low"), memory_mode="Dedicated_Sram" if "u85" in args.target else "Shared_Sram",
                        extra_flags=args.vela_flags.split() if args.vela_flags else None,
                        config_ini=str(HERE.parent / "scripts/vela/default_vela.ini"))
-if args.model == "whisper-tiny-encoder":
+if args.model.startswith("whisper-"):
     data = pe.load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
-    wrapper = pe.load_module_from_path("whisper_et_model", HERE / "whisper_et_model.py")
-    module, example = wrapper._build("openai/whisper-tiny", wrapper.WhisperPart.ENCODER, 128)
+    wrapper = pe.load_module_from_path("whisper_executorch_wrapper", HERE / "whisper_executorch_wrapper.py")
+    size, part = args.model.split("-")[1:3]  # whisper-<size>-<encoder|decoder>
     pairs = data.gather_librispeech_files("/home/shared/LibriSpeech", "dev-clean", args.n_cal)
-    cal = [(pe.log_mel(data.load_audio_torchaudio(p), DEV),) for p, _ in pairs]
+    mels = [pe.log_mel(data.load_audio_torchaudio(p), DEV) for p, _ in pairs]
+    if part == "encoder":
+        module, example = wrapper._build(f"openai/whisper-{size}", wrapper.WhisperPart.ENCODER, 128)
+        cal = [(m,) for m in mels]
+    else:  # decoder: static-length ids + fp32 encoder states; ids from an fp32 greedy decode so observers see real tokens
+        encoder, _ = wrapper._build(f"openai/whisper-{size}", wrapper.WhisperPart.ENCODER, 128)
+        module, example = wrapper._build(f"openai/whisper-{size}", wrapper.WhisperPart.DECODER, 128)
+        greedy = pe.GreedyDecoder(f"openai/whisper-{size}", 128, DEV)
+        encoder.to(DEV); module.to(DEV); cal = []
+        with torch.no_grad():
+            for m in mels:
+                states = encoder(m)
+                tokens, _ = greedy.decode(module, states)
+                cal.append((greedy.padded_ids(list(greedy.prompt) + tokens), states))
+        module.cpu(); del encoder
 else:
     sys.path.insert(0, str(HERE))
     import fqvit_models
