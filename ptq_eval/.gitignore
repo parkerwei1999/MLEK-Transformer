@@ -1,0 +1,5 @@
+ovl
+__pycache__/
+et131_*/
+imagenet50k/
+*.log
