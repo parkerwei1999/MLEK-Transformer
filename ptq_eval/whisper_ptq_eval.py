@@ -419,10 +419,25 @@ def main(args) -> None:
     decoder, dec_example = wrapper._build(args.model_id, wrapper.WhisperPart.DECODER, args.dec_len)
     global PC_REWRITE
     PC_REWRITE = args.pc_rewrite
-    if args.ln_newton_steps:
-        from newton_layernorm import swap_layernorms
-        n_swapped = swap_layernorms(encoder, args.ln_newton_steps) + swap_layernorms(decoder, args.ln_newton_steps)
-        print(f"  NewtonLayerNorm: {n_swapped} LayerNorms swapped, {args.ln_newton_steps} step(s)", flush=True)
+    if args.ln_newton_steps is not None or args.ln_dual_q is not None:
+        from newton_layernorm import swap_layernorms, collect_var_quantiles
+        steps = args.ln_newton_steps or 0
+        cmaps = {}
+        if args.ln_dual_q is not None:  # fp32 pass over the calibration utterances (real greedy decode) -> per-LN variance quantile
+            encoder.to(device); decoder.to(device)
+            greedy_c = GreedyDecoder(args.model_id, args.dec_len, device)
+            def run_c():
+                for audio_path, _ in cal_pairs:
+                    states = encoder(log_mel(data.load_audio_torchaudio(audio_path), device))
+                    greedy_c.decode(decoder, states)
+            combined = torch.nn.ModuleDict({"enc": encoder, "dec": decoder})  # one pass collects both
+            cm = collect_var_quantiles(combined, run_c, args.ln_dual_q)
+            cmaps = {"encoder": {k[4:]: v for k, v in cm.items() if k.startswith("enc.")},
+                     "decoder": {k[4:]: v for k, v in cm.items() if k.startswith("dec.")}}
+            encoder.cpu(); decoder.cpu()
+            print(f"  dual-range rsqrt: q={args.ln_dual_q}, {len(cm)} LayerNorms, c range {min(cm.values()):.3g}..{max(cm.values()):.3g}", flush=True)
+        n_swapped = swap_layernorms(encoder, steps, cmaps.get("encoder")) + swap_layernorms(decoder, steps, cmaps.get("decoder"))
+        print(f"  NewtonLayerNorm: {n_swapped} LayerNorms swapped, {steps} step(s), dual={args.ln_dual_q}", flush=True)
     compile_spec = EthosUCompileSpec(
         args.target, system_config=args.system_config, memory_mode=args.memory_mode,
         extra_flags=["--verbose-operators", "--verbose-cycle-estimate"], config_ini=args.vela_config)
@@ -553,8 +568,10 @@ def main(args) -> None:
         label += "-maskaware"
     if args.prec_rules:
         label += f"-rules[{args.prec_rules}]"
-    if args.ln_newton_steps:
+    if args.ln_newton_steps is not None:
         label += f"-newton{args.ln_newton_steps}"
+    if args.ln_dual_q is not None:
+        label += f"-dual{args.ln_dual_q}"
     if args.pc_rewrite:
         label += "-pcrw"
     if args.dump_ln_scales:
@@ -592,8 +609,10 @@ if __name__ == "__main__":
     parser.add_argument("--keep-fp32", nargs="*", choices=[k.value for k in KeepFp32], default=[])
     parser.add_argument("--pc-rewrite", action="store_true", default=False,
                         help="Rewrite per-channel activation Q/DQ into per-tensor + int32 MULs (pc_rewrite.py) before evaluation.")
-    parser.add_argument("--ln-newton-steps", type=int, default=0,
-                        help="Swap nn.LayerNorm for NewtonLayerNorm: rsqrt table seed + N int32 Newton steps (0 = off).")
+    parser.add_argument("--ln-dual-q", type=float, default=None,
+                        help="Dual-range rsqrt in NewtonLayerNorm: fine table sized by this per-token variance quantile (e.g. 0.995).")
+    parser.add_argument("--ln-newton-steps", type=int, default=None,
+                        help="Swap nn.LayerNorm for NewtonLayerNorm (keepdim formulation): rsqrt table seed + N int32 Newton steps; 0 = swap only.")
     parser.add_argument("--dump-ln-scales", action="store_true", default=False,
                         help="Write per-LayerNorm quantization grids vs fp32 token variance to the out dir.")
     parser.add_argument("--mask-aware", action="store_true", default=False,

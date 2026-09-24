@@ -18,6 +18,10 @@ sys.path.insert(0, str(HERE))
 import fqvit_models  # noqa: E402
 from fqvit_models import imagenet_data as data  # noqa: E402
 model = fqvit_models.build_model(model_name)
+import os
+if os.environ.get("LN_NEWTON") is not None:  # LN_NEWTON=<steps>: swap LayerNorms for NewtonLayerNorm
+    from newton_layernorm import swap_layernorms
+    print(f"NewtonLayerNorm: {swap_layernorms(model, int(os.environ['LN_NEWTON']))} swapped")
 cs = pe.EthosUCompileSpec("ethos-u85-256", system_config="Ethos_U85_SYS_DRAM_Low", memory_mode="Dedicated_Sram")
 rules = []
 for item in [r for r in rules_str.split(";") if r]:

@@ -21,9 +21,23 @@ from torch import nn
 
 
 class NewtonLayerNorm(nn.LayerNorm):
-    def __init__(self, normalized_shape, eps=1e-5, newton_steps=2):
+    """keepdim LayerNorm with (a) N Newton steps on 1/sqrt(var) and (b) an optional dual-range rsqrt:
+
+    dual range (c = per-LN quantile of the per-token variance, set at calibration): a fine table
+    y_f = rsqrt(clamp(v, max=c)) whose int16 input grid is sized by c (ordinary tokens get thousands of
+    levels, sink tokens saturate) and the coarse table y_c = rsqrt(v) sized by the max (right for the
+    sink), blended with a mask m = clamp(5 v / c - 4, 0, 1) (0 up to v = 0.8 c, 1 from c): y = y_f + m (y_c - y_f).
+    c must sit below the sink fraction of tokens (decoder sinks are ~1 per utterance, i.e. a few percent), so q ~ 0.9. Every op is
+    add / sub / mul / clamp / rsqrt, i.e. TOSA ADD/SUB/MUL/CLAMP/TABLE + RESCALE.
+    """
+
+    def __init__(self, normalized_shape, eps=1e-5, newton_steps=2, c=None):
         super().__init__(normalized_shape, eps=eps, elementwise_affine=True)
         self.newton_steps = newton_steps
+        self.c = None if c is None else float(c)
+        if self.c is not None:  # mask ramps from 0 at v = 0.8 c to 1 at v = c (fine table exact below c)
+            self.register_buffer("mask_gain", torch.tensor(5.0 / self.c))
+            self.register_buffer("mask_bias", torch.tensor(4.0))
         n = 1
         for d in self.normalized_shape:
             n *= d
@@ -32,33 +46,60 @@ class NewtonLayerNorm(nn.LayerNorm):
         self.register_buffer("c05", torch.tensor(0.5))
 
     @classmethod
-    def from_layernorm(cls, ln: nn.LayerNorm, newton_steps: int):
-        m = cls(ln.normalized_shape, eps=ln.eps, newton_steps=newton_steps)
+    def from_layernorm(cls, ln: nn.LayerNorm, newton_steps: int, c=None):
+        m = cls(tuple(ln.normalized_shape), eps=ln.eps, newton_steps=newton_steps, c=c)
         with torch.no_grad():
             m.weight.copy_(ln.weight)
             m.bias.copy_(ln.bias)
         return m
 
-    def forward(self, x):
+    def forward(self, x, *_args, **_kwargs):  # FQ-ViT LayerNorms are called with extra quantizer args (unused when quant=False)
         mean = x.sum(-1, keepdim=True) * self.inv_n
         xc = x - mean
         var = (xc * xc).sum(-1, keepdim=True) * self.inv_n + self.eps
-        y = torch.rsqrt(var)  # coarse seed through the int16 table
+        if self.c is None:
+            y = torch.rsqrt(var)  # seed through the int16 table (grid sized by the max token)
+        else:
+            y_coarse = torch.rsqrt(var)
+            y_fine = torch.rsqrt(torch.clamp(var, max=self.c))  # int16 grid sized by c; sinks saturate here
+            m = torch.clamp(var * self.mask_gain - self.mask_bias, 0.0, 1.0)  # 0 for v <= 0.8 c, 1 for v >= c
+            y = y_fine + m * (y_coarse - y_fine)
         for _ in range(self.newton_steps):
             y = y * (self.c15 - (var * y * y) * self.c05)
         return xc * y * self.weight + self.bias
 
 
-def swap_layernorms(module: nn.Module, newton_steps: int) -> int:
-    """Replace every nn.LayerNorm under `module` in place (same attribute name); returns the count."""
+def swap_layernorms(module: nn.Module, newton_steps: int, cmap=None) -> int:
+    """Replace every nn.LayerNorm under `module` in place (same attribute name); returns the count.
+    cmap: {module name: c} from collect_var_quantiles enables the dual-range rsqrt."""
     count = 0
     for name, child in list(module.named_modules()):
-        if type(child) is nn.LayerNorm and name:
+        if isinstance(child, nn.LayerNorm) and not isinstance(child, NewtonLayerNorm) and name:
             parent_name, _, attr = name.rpartition(".")
             parent = module.get_submodule(parent_name) if parent_name else module
-            setattr(parent, attr, NewtonLayerNorm.from_layernorm(child, newton_steps))
+            c = cmap.get(name) if cmap else None
+            setattr(parent, attr, NewtonLayerNorm.from_layernorm(child, newton_steps, c=c))
             count += 1
     return count
+
+
+def collect_var_quantiles(module: nn.Module, run_fn, q: float) -> dict:
+    """fp32 calibration pass: per LayerNorm (by name) the q-quantile of the per-token variance of its input.
+    run_fn() must drive `module` over the calibration data (hooks collect the variances)."""
+    stats, hooks = {}, []
+    def hook(name):
+        def fn(mod, inp, out):
+            x = inp[0].detach().float()
+            stats.setdefault(name, []).append(x.var(-1, unbiased=False).reshape(-1).cpu())
+        return fn
+    for name, child in module.named_modules():
+        if isinstance(child, nn.LayerNorm) and name:
+            hooks.append(child.register_forward_hook(hook(name)))
+    with torch.no_grad():
+        run_fn()
+    for h in hooks:
+        h.remove()
+    return {name: torch.cat(v).quantile(q).item() for name, v in stats.items()}
 
 
 if __name__ == "__main__":  # fp32 self-check: Newton LN == nn.LayerNorm
@@ -72,3 +113,6 @@ if __name__ == "__main__":  # fp32 self-check: Newton LN == nn.LayerNorm
         m = NewtonLayerNorm.from_layernorm(ln, steps)
         err = (m(x) - ln(x)).abs().max().item()
         print(f"newton_steps={steps}: max|diff| vs nn.LayerNorm = {err:.2e}")
+    c = x.var(-1, unbiased=False).quantile(0.995).item()
+    m = NewtonLayerNorm.from_layernorm(ln, 0, c=c)
+    print(f"dual-range c={c:.3g}: max|diff| vs nn.LayerNorm = {(m(x) - ln(x)).abs().max().item():.2e}")
