@@ -88,7 +88,9 @@ int8 boundaries (A/B control). The harness prints `memory-op pass: transparent=N
   per-tensor int8 Q/DQ plus two int32 MULs by constant vectors (one NPU partition on DeiT / Whisper).
   `a16inptf8out` and `a16inpc8out` carry per-channel zero points, which the rewrite does not handle
   and TOSA's `input_zp = 0` rule on the int16 / int32 path forbids, so they stay fake-quant experiments.
-* The Whisper decoder is exported as a static 128-position graph without a KV cache; its Vela number
-  is one pass over that graph, not a per-token latency.
+* The Whisper decoder is exported as a static 128-position graph without a KV cache and is run once
+  per generated token (pad, run, read the logits of the current position); its Vela number is the
+  cost of one such pass, i.e. the constant per-token latency of that scheme, and time-to-first-token
+  is the encoder pass plus one decoder pass. A cached single-step decoder is not exported.
 * Swin's `torch.roll` decomposes to ops the Arm partitioner leaves on the CPU; Vela cost numbers for
   Swin are sums over its partitions.
