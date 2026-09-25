@@ -36,7 +36,7 @@ class _FineRsqrt(nn.Module):
 
 
 class _Mask(nn.Module):
-    """m = clamp(v * gain - bias, 0, 1): 0 up to v = 0.8 c, 1 from v = c. Its own submodule so it can run at int16
+    """m = clamp(v * gain - bias, 0, 1): 0 up to v = 0.4 c, 1 from v = 0.5 c. Its own submodule so it can run at int16
     (`layer_norm\\.mask$=a16w8e16:kmedian`: MUL / SUB / CLAMP on int16, all Vela-native); 1/32767 resolution is plenty."""
 
     def __init__(self, c: float):

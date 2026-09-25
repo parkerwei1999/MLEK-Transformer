@@ -18,6 +18,7 @@ import argparse
 import dataclasses
 import importlib.util
 import json
+import os
 import random
 import time
 from enum import Enum
@@ -412,6 +413,8 @@ def main(args) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = args.device
+    if args.ln_dual_k is not None:
+        os.environ["LN_DUAL_K"] = str(args.ln_dual_k)  # KMedianObserver reads it: keep the flag and the observer on the same k
     stages = {Stage(s) for s in args.stages}
     calib_mode = CalibMode(args.calib_mode)
     torch.manual_seed(args.seed)
@@ -432,7 +435,8 @@ def main(args) -> None:
             json.dump(results, f, indent=2)
 
     if Stage.FP32_OPENAI in stages:
-        model = whisper.load_model("tiny", device=device)
+        # openai-whisper names: tiny / base / small / medium / large-v3 = the HF id without "openai/whisper-"
+        model = whisper.load_model(args.model_id.rsplit("/", 1)[-1].removeprefix("whisper-"), device=device)
 
         def transcribe_openai(audio):
             return protocol.transcribe_whisper_deterministic(model, audio)["text"], False, 0
@@ -479,13 +483,13 @@ def main(args) -> None:
     feed = CalibFeed(args.calib_feed)
     keep_fp32 = [KeepFp32(k) for k in args.keep_fp32]
     quantizer_cls = EthosUQuantizer
-    if args.mask_aware or args.prec_rules:
+    if args.mask_aware or args.prec_rules or args.embedding_bits:
         maq = load_module_from_path("mask_aware_quantizer", HERE / "mask_aware_quantizer.py")
         quantizer_cls = maq.MaskAwareQuantizer
-    if args.prec_rules:
+    if args.prec_rules or args.embedding_bits:  # the embedding table is annotated by MixedPrecisionQuantizer, rules or not
         import functools
         rules = []
-        for item in args.prec_rules.split(";"):
+        for item in (args.prec_rules.split(";") if args.prec_rules else []):
             regex, cfg = item.rsplit("=", 1)
             cfg, _, ops = cfg.partition("@")
             cfg, _, obs = cfg.partition(":")
@@ -648,7 +652,7 @@ if __name__ == "__main__":
     parser.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16],
                         help="Quantize the decoder token-embedding table (per-tensor symmetric) instead of leaving it fp32.")
     parser.add_argument("--ln-dual-k", type=float, default=None,
-                        help="Dual-range rsqrt with the fine table sized by K x median per-token variance (rules: layer_norm\\.fine$=a32w8@clamp;layer_norm\\.fine$=a16w8e16).")
+                        help="Dual-range rsqrt with the fine table sized by K x median per-token variance (rules: layer_norm\\.fine$=a32w8@mul;layer_norm\\.fine$=a16w8e16:kmedian;layer_norm\\.mask$=a16w8e16:kmedian). Also sets LN_DUAL_K for the kmedian observer.")
     parser.add_argument("--ln-dual-q", type=float, default=None,
                         help="Dual-range rsqrt in NewtonLayerNorm: fine table sized by this per-token variance quantile (e.g. 0.995).")
     parser.add_argument("--ln-newton-steps", type=int, default=None,

@@ -1,6 +1,6 @@
 """Isolate the LayerNorm: fake-quant one LN (rules as in the harness) on synthetic sink-like inputs and measure the per-token
 output error vs fp32 LayerNorm, for plain / Newton / dual variants. No decoder, no WER."""
-import functools, sys, torch
+import functools, os, sys, torch
 from pathlib import Path
 from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e
 HERE = Path(__file__).resolve().parent
@@ -24,6 +24,8 @@ def make_batch(n_utt=8):
 cal, test = make_batch(16), make_batch(4)
 rules = 'ln\\.fine$=a32w8@mul;ln\\.fine$=a16w8e16:kmedian;ln\\.mask$=a16w8e16:kmedian;ln$=a32w8@sub,mul,sum.dim_IntList,add;ln$=a16w8'
 def run(variant, steps, q, k=None):
+    if k is not None:
+        os.environ["LN_DUAL_K"] = str(k)  # the kmedian observer's k must follow the variant, not the process default
     class Wrap(torch.nn.Module):
         def __init__(self):
             super().__init__(); self.ln = torch.nn.LayerNorm(d); self.ln.load_state_dict(ln.state_dict())

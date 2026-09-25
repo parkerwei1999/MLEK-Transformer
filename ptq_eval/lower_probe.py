@@ -4,6 +4,7 @@ TOSAPartitioner (op / dtype / TABLE report of the .tosa partitions, CPU-fallback
 (2) the Ethos-U85 flow with EthosUPartitioner + Vela (pass/fail, delegated node counts)."""
 import argparse, functools, json, sys, traceback
 from collections import Counter
+import os
 from pathlib import Path
 import torch
 from executorch.backends.arm.ethosu import EthosUCompileSpec
@@ -28,7 +29,7 @@ ap.add_argument("--out-dir", required=True)
 ap.add_argument("--n-cal", type=int, default=8)
 ap.add_argument("--ln-newton-steps", type=int, default=None, help="swap nn.LayerNorm for NewtonLayerNorm with N Newton steps (0 = swap only)")
 ap.add_argument("--ln-dual-q", type=float, default=None, help="dual-range rsqrt: fine table sized by this per-token variance quantile")
-ap.add_argument("--ln-dual-k", type=float, default=None, help="dual-range rsqrt: fine table sized by K x median per-token variance")
+ap.add_argument("--ln-dual-k", type=float, default=None, help="dual-range rsqrt: fine table sized by K x median per-token variance (rules: layer_norm\\.fine$=a32w8@mul;layer_norm\\.fine$=a16w8e16:kmedian;layer_norm\\.mask$=a16w8e16:kmedian); also sets LN_DUAL_K for the kmedian observer")
 ap.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16], help="quantize aten.embedding tables (decoder)")
 ap.add_argument("--mask-aware", action="store_true", default=False, help="MaskAwareQuantizer softmax-input rewrite, as the vision accuracy runs use")
 ap.add_argument("--pc-rewrite", action="store_true", default=False, help="lower per-channel activation Q/DQ to per-tensor + int32 MULs (pc_rewrite.py)")
@@ -37,6 +38,8 @@ args = ap.parse_args()
 out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 torch.backends.cudnn.allow_tf32 = False; torch.backends.cuda.matmul.allow_tf32 = False
 DEV = "cuda"
+if args.ln_dual_k is not None:
+    os.environ["LN_DUAL_K"] = str(args.ln_dual_k)  # KMedianObserver reads it: keep the flag and the observer on the same k
 rules = []
 for item in [r for r in args.prec_rules.split(";") if r]:
     rx, cfg = item.rsplit("=", 1); cfg, _, ops = cfg.partition("@"); cfg, _, obs = cfg.partition(":")
@@ -50,7 +53,11 @@ cs = EthosUCompileSpec(args.target, system_config=SYSCFG.get(args.target, "Ethos
 if args.model.startswith("whisper-"):
     data = pe.load_module_from_path("librispeech_data", HERE / "data/librispeech_data.py")
     wrapper = pe.load_module_from_path("whisper_executorch_wrapper", HERE / "whisper_executorch_wrapper.py")
-    size, part = args.model.split("-")[1:3]  # whisper-<size>-<encoder|decoder>
+    size, part = args.model[len("whisper-"):].rsplit("-", 1)  # whisper-<size>-<encoder|decoder>; size may contain '-' (large-v3)
+    if part not in ("encoder", "decoder"):
+        raise SystemExit(f"--model must be whisper-<size>-<encoder|decoder>, got {args.model}")
+    from transformers import AutoConfig
+    pe.N_MELS = AutoConfig.from_pretrained(f"openai/whisper-{size}").num_mel_bins  # large-v3 uses 128 mel bins
     pairs = data.gather_librispeech_files("/home/shared/LibriSpeech", "dev-clean", args.n_cal)
     mels = [pe.log_mel(data.load_audio_torchaudio(p), DEV) for p, _ in pairs]
     if part == "encoder":

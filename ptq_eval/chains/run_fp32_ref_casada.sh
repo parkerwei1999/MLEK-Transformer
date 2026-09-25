@@ -2,7 +2,7 @@
 # fp32 references (fp32-static stage) for the sizes whose chains have none:
 # whisper-medium 200 utt and whisper-large-v3 100 utt, same cal/eval protocol as the int8 cells.
 set -uo pipefail
-PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$PY}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
+PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$HOME/venv_et131_gpu/bin/python3}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
 export PYTHONPATH="$K/ovl:$K"; export PATH="$HOME/ml-embedded-evaluation-kit-26.06/resources_downloaded/env/bin:$PATH"
 cd "$K"
 run() { echo "== whisper-$1 fp32_static n=$2 $(date +%T)"

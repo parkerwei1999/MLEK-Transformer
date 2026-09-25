@@ -16,6 +16,7 @@ import argparse
 import importlib.util
 import itertools
 import json
+import os
 import sys
 import time
 from enum import Enum
@@ -53,6 +54,8 @@ def main(args) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = args.device
+    if args.ln_dual_k is not None:
+        os.environ["LN_DUAL_K"] = str(args.ln_dual_k)  # KMedianObserver reads it: keep the flag and the observer on the same k
     if args.n_eval % args.batch_size or args.n_cal % args.batch_size:
         raise ValueError("n_cal and n_eval must be multiples of the static batch size")
 
@@ -205,7 +208,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--pc-rewrite-bits", type=int, default=None, help="pc_rewrite int32 activation grid = s_base / 2^bits (default adaptive)")
-    parser.add_argument("--ln-dual-k", type=float, default=None, help="Dual-range rsqrt: fine table sized by K x median per-token variance.")
+    parser.add_argument("--ln-dual-k", type=float, default=None, help="Dual-range rsqrt: fine table sized by K x median per-token variance (rules: norm\\d?\\.fine$=a32w8@mul;norm\\d?\\.fine$=a16w8e16:kmedian;norm\\d?\\.mask$=a16w8e16:kmedian). Also sets LN_DUAL_K for the kmedian observer.")
     parser.add_argument("--ln-dual-q", type=float, default=None,
                         help="Dual-range rsqrt in NewtonLayerNorm: fine table sized by this per-token variance quantile.")
     parser.add_argument("--ln-newton-steps", type=int, default=None,

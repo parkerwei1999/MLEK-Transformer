@@ -2,7 +2,7 @@
 # whisper-large-v3 on the full test-clean: fp32 reference and the dual k=8 recipe; waits for the medium dual+PCS cell.
 # headline recipe (int8 conv/front GELU/proj/logits/fc1, int16 residual, LN-i32, dual k=8 rsqrt).
 set -uo pipefail
-PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$PY}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
+PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$HOME/venv_et131_gpu/bin/python3}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
 export PYTHONPATH="$K/ovl:$K"; export PATH="$HOME/ml-embedded-evaluation-kit-26.06/resources_downloaded/env/bin:$PATH"
 until grep -q "^== done" "$OUT/run_medium_dual_pcs_casada.log" 2>/dev/null; do sleep 600; done
 cd "$K"; export LN_DUAL_K=8

@@ -79,8 +79,11 @@ Observers: `histogram` (default for int8), `minmax`, `kmedian` (k x median, satu
 
 After annotation, shape / memory ops (view, permute, slice, cat, ...) whose producer is per-channel get
 their annotation removed (the per-channel values pass through, the consumer re-quantizes); those whose
-producer is int16 / int32 per-tensor get int16 carriers. `PTQ_MEMORY_OP_PASS=off` restores the stock
-int8 boundaries (A/B control). The harness prints `memory-op pass: transparent=N int16-carrier=M`.
+producer is int16 / int32 per-tensor get an int16 carrier with its own MinMax observer, i.e. a
+re-quantization to int16 at the memory op, not a `SharedQuantizationSpec` that reuses the producer's
+qparams (an int16 re-quantization of an int16 / int32 tensor, so the loss is at the int16 grid, but the
+codes are not bit-identical to the producer's). `PTQ_MEMORY_OP_PASS=off` restores the stock int8
+boundaries (A/B control). The harness prints `memory-op pass: transparent=N int16-carrier=M`.
 
 ## Known limits
 

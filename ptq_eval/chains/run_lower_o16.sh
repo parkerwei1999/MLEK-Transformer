@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cost of promoting the LN OUTPUT to int16 (projections a16in8out: int16 IFM, int8 OFM) vs o8, on Vela.
 set -uo pipefail
-PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$PY}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
+PTQ_EVAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; K="$PTQ_EVAL"; PY="${PTQ_PY:-$HOME/venv_et131_gpu/bin/python3}"; OUT="${PTQ_OUT:-$PTQ_EVAL/out}"; mkdir -p "$OUT"
 export PYTHONPATH="$K/ovl:$K"; export PATH="$HOME/ml-embedded-evaluation-kit-26.06/resources_downloaded/env/bin:$PATH"
 cd "$K"
 run() { out=$OUT/lower_cost/$1; echo "== $1 $(date +%T)"; "$PY" lower_probe.py --model $2 --quant-config $3 --prec-rules "$4" "${@:5}" --out-dir $out > $out.stdout 2>&1
