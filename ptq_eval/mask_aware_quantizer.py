@@ -106,7 +106,14 @@ class MaskAwareQuantizer(EthosUQuantizer):
         def derive(obs_or_fqs):
             scale, zero_point = obs_or_fqs[0].calculate_qparams()
             if zp is not None:
-                zero_point = torch.full_like(zero_point, qmax if zp == 127 else zp)
+                if dtype == torch.int16:
+                    # TOSA / the Arm backend require zero_point == 0 on int16 tensors
+                    # (InsertRescaleInt32Pass). Keep the grid symmetric and double the scale so
+                    # x - max in [-(max - min), 0] still fits: 15 bits remain for the range.
+                    scale = scale * 2
+                    zero_point = torch.zeros_like(zero_point)
+                else:
+                    zero_point = torch.full_like(zero_point, qmax if zp == 127 else zp)
             return scale, zero_point
         return DerivedQuantizationSpec(derived_from=[scores], derive_qparams_fn=derive,
                                        dtype=dtype, quant_min=qmin, quant_max=qmax, qscheme=qscheme)
