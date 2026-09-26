@@ -34,6 +34,8 @@ ap.add_argument("--embedding-bits", type=int, default=None, choices=[8, 16], hel
 ap.add_argument("--mask-aware", action="store_true", default=False, help="MaskAwareQuantizer softmax-input rewrite, as the vision accuracy runs use")
 ap.add_argument("--pc-rewrite", action="store_true", default=False, help="lower per-channel activation Q/DQ to per-tensor + int32 MULs (pc_rewrite.py)")
 ap.add_argument("--verbose-partition", action="store_true", default=False, help="log the Arm partitioner's per-node rejection reasons")
+ap.add_argument("--tosa-only", action="store_true", default=False,
+                help="lower once with the TOSA partitioner and dump the .tosa partitions; skip the Ethos-U lowering and .pte serialization (run Vela on the .tosa files instead)")
 args = ap.parse_args()
 out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
 torch.backends.cudnn.allow_tf32 = False; torch.backends.cuda.matmul.allow_tf32 = False
@@ -132,6 +134,8 @@ def report(tag, partitioner, intermediates=None):
                       "matmul": {f"in={k[0]} out={k[1]}": v for k, v in rep["matmul"].items()}})
         print(f"  [{tag}] tosa dtypes={entry['tosa_output_dtypes']} tables={entry['tables']} matmul={entry['matmul']}", flush=True)
         print(f"  [{tag}] tosa ops={entry['tosa_ops']}", flush=True)
+    if args.tosa_only:
+        return entry  # .pte serialization is not needed for a cost receipt
     try:
         edge.to_executorch()
         entry["to_executorch"] = "ok"
@@ -143,5 +147,6 @@ def report(tag, partitioner, intermediates=None):
 tosa_cs = TosaCompileSpec(TosaSpecification.create_from_string("TOSA-1.0+INT+int16" + ("+u55" if "u55" in args.target else "")))
 inter = out / "tosa"; tosa_cs.dump_intermediate_artifacts_to(str(inter))
 result["tosa"] = report("TOSA", TOSAPartitioner(tosa_cs), inter)
-result["ethosu"] = report("EthosU85+Vela", EthosUPartitioner(cs))
+if not args.tosa_only:  # --tosa-only: cost the dumped .tosa files with Vela directly (e.g. chains/run_lower_a16_pair.sh)
+    result["ethosu"] = report("EthosU85+Vela", EthosUPartitioner(cs))
 (out / "summary.json").write_text(json.dumps(result, indent=2))
