@@ -20,7 +20,7 @@ for cell in "$@"; do IFS=: read -r s p kind <<< "$cell"
   grep -E "\[TOSA\] partitions=|LOWERING FAILED" $out.stdout | tail -2 | cut -c1-120
   for c in ethos-u85-256:Ethos_U85_SYS_DRAM_Low ethos-u85-512:Ethos_U85_SYS_DRAM_Mid_512 ethos-u85-1024:Ethos_U85_SYS_DRAM_Mid_1024 ethos-u85-2048:Ethos_U85_SYS_DRAM_High_2048; do
     acc=${c%%:*}; sc=${c##*:}; f=$LC/sweep/${name}__$acc.txt; : > $f
-    for t in $out/tosa/*.tosa; do "$V" "$t" --accelerator-config $acc --system-config $sc --memory-mode Dedicated_Sram --config "$CFG" --verbose-performance --output-dir /tmp/vela_a16pair_$$ 2>&1 | grep -E "Batch Inference time|Total +DRAM bandwidth +per input|NPU cycles" >> $f; done
+    for t in $out/tosa/*.tosa; do "$V" "$t" --accelerator-config $acc --system-config $sc --memory-mode Dedicated_Sram --config "$CFG" --verbose-performance --verbose-cycle-estimate --output-dir /tmp/vela_a16pair_$$ 2>&1 | grep -E "Batch Inference time|Total +DRAM bandwidth +per input|NPU cycles" >> $f; done
     echo "   $acc: $(grep -hoE 'Batch Inference time +[0-9.]+' $f | awk '{s+=$4} END{printf "%.1f ms", s}')"
   done
 done
