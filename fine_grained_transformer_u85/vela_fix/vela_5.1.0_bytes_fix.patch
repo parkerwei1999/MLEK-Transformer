@@ -1,0 +1,39 @@
+--- a/ethosu/regor/architecture/ethosu85/ethos_u85_performance.cpp
++++ b/ethosu/regor/architecture/ethosu85/ethos_u85_performance.cpp
+@@ -670,17 +670,17 @@
+ 
+     ElementAccess result = access;
+ 
+-    // IFM bytes transferred
++    // IFM bytes transferred (element counts converted to bytes before the burst penalty)
+     const int ifmCount = query.ifmShape[1] ? int(std::size(query.ifmShape)) : 1;
+     for ( int i = 0; i < ifmCount; i++ )
+     {
+         result.ifmRead[i] = EstimateMemoryTransfer(_arch->_cores, true, query.ifmMemory[i], query.ifmFormat[i],
+-            DataTypeSizeBits(query.ifmType[i]), ifmBlock, query.ifmShape[i], access.ifmRead[i]);
++            DataTypeSizeBits(query.ifmType[i]), ifmBlock, query.ifmShape[i], access.ifmRead[i] * DataTypeSizeBits(query.ifmType[i]) / 8);
+     }
+ 
+     // OFM bytes transferred
+     result.ofmWrite = EstimateMemoryTransfer(_arch->_cores, false, query.ofmMemory, query.ofmFormat,
+-        DataTypeSizeBits(query.ofmType), ofmBlock, query.ofmShape, access.ofmWrite);
++        DataTypeSizeBits(query.ofmType), ofmBlock, query.ofmShape, access.ofmWrite * DataTypeSizeBits(query.ofmType) / 8);
+ 
+     // Use encoded information from query to estimate weight reads if present
+     result.constRead[0] = result.constRead[1] = 0;
+@@ -708,13 +708,13 @@
+                 int ifmIdx = GetUsageIndex(fmRecord.usage);
+                 assert(size_t(ifmIdx) < std::size(extAccess.ifmRead) && size_t(ifmIdx) < std::size(opInfo.ifm));
+                 extAccess.ifmRead[ifmIdx] = EstimateMemoryTransfer(_arch->_cores, true, fmRecord.memory, fmRecord.format,
+-                    DataTypeSizeBits(opInfo.ifm[ifmIdx].type), ifmBlock, fmRecord.shape, extAccess.ifmRead[ifmIdx]);
++                    DataTypeSizeBits(opInfo.ifm[ifmIdx].type), ifmBlock, fmRecord.shape, extAccess.ifmRead[ifmIdx] * DataTypeSizeBits(opInfo.ifm[ifmIdx].type) / 8);
+             }
+             else
+             {
+                 assert(IsOFM(fmRecord.usage) && "Unexpected usage for external FM");
+                 extAccess.ofmWrite = EstimateMemoryTransfer(_arch->_cores, false, fmRecord.memory, fmRecord.format,
+-                    DataTypeSizeBits(opInfo.ofm.type), ofmBlock, fmRecord.shape, extAccess.ofmWrite);
++                    DataTypeSizeBits(opInfo.ofm.type), ofmBlock, fmRecord.shape, extAccess.ofmWrite * DataTypeSizeBits(opInfo.ofm.type) / 8);
+             }
+         }
+     }

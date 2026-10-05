@@ -25,3 +25,6 @@
 [submodule "dependencies/executorch"]
 	path = dependencies/executorch
 	url = https://github.com/pytorch/executorch.git
+[submodule "fine_grained_transformer_u85/3rdparty/FQ-ViT"]
+	path = fine_grained_transformer_u85/3rdparty/FQ-ViT
+	url = https://github.com/megvii-research/FQ-ViT.git
